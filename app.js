@@ -191,7 +191,7 @@ function saveSet() {
   const reps = Math.round(num(a.reps));
   if (reps <= 0) { toast('Enter your reps first'); return; }
   const w = a.weights[ex.wc], prev = lastEntry(ex.id);
-  const entry = { t: Date.now(), w, reps };
+  const entry = { t: Date.now(), w, reps, wu: a.weights.slice(0, ex.wc).map(x => ({ w: x, reps: ex.wreps })) };
   (db.history[ex.id] = hist(ex.id)).push(entry);
   ex.ww = a.weights.slice(0, ex.wc);
   db.lastDayId = f.day.id;
@@ -298,6 +298,10 @@ function viewWorkout() {
 const fmtTime = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
 /* progress */
+// Total weight lifted in a session: every warm-up set plus the working set, reps × weight.
+// Sessions logged before warm-ups were recorded only have the working set.
+const entryVol = e => (e.wu || []).reduce((s, x) => s + x.w * x.reps, 0) + e.w * e.reps;
+const fmtN = n => Math.round(n).toLocaleString();
 function computeProg(entries) {
   let cum = 0;
   return entries.map((e, i) => {
@@ -314,8 +318,8 @@ function computeProg(entries) {
 function chartSvg(entries, mode) {
   if (!entries.length) return '<div class="empty">No sessions logged yet for this exercise.</div>';
   const pts = computeProg(entries);
-  const vals = mode === 'weight' ? entries.map(e => e.w) : pts.map(p => p.cum);
-  const W = 340, H = 220, L = 38, R = 14, T = 16, B = 28;
+  const vals = mode === 'weight' ? entries.map(e => e.w) : mode === 'volume' ? entries.map(entryVol) : pts.map(p => p.cum);
+  const W = 340, H = 220, L = mode === 'volume' ? 52 : 38, R = 14, T = 16, B = 28;
   let min = Math.min(...vals), max = Math.max(...vals);
   if (min === max) { min -= 1; max += 1; }
   const pad = (max - min) * 0.12; min -= pad; max += pad;
@@ -326,7 +330,7 @@ function chartSvg(entries, mode) {
   for (let k = 0; k <= 4; k++) {
     const v = min + (max - min) * k / 4, y = Y(v);
     g += `<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" stroke="var(--line)" stroke-width="1"/>
-          <text x="${L - 6}" y="${y + 4}" text-anchor="end" fill="var(--mute)" font-size="11">${fw(Math.round(v * 10) / 10)}</text>`;
+          <text x="${L - 6}" y="${y + 4}" text-anchor="end" fill="var(--mute)" font-size="11">${mode === 'volume' ? fmtN(v) : fw(Math.round(v * 10) / 10)}</text>`;
   }
   const line = vals.map((v, i) => `${i ? 'L' : 'M'}${X(i)},${Y(v)}`).join(' ');
   let dots = '';
@@ -352,17 +356,22 @@ function viewProgress() {
   return `${hdr('Progress', 'home')}
   <select id="progSel">${db.days.map(d => d.exercises.length ? `<optgroup label="${esc(d.name)}">${d.exercises.map(e =>
     `<option value="${e.id}" ${e.id === ui.progEx ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</optgroup>` : '').join('')}</select>
-  <div class="seg"><button data-a="mode" data-id="progress" class="${ui.mode === 'progress' ? 'on' : ''}">Progress (reps)</button>
-    <button data-a="mode" data-id="weight" class="${ui.mode === 'weight' ? 'on' : ''}">Weight</button></div>
+  <div class="seg"><button data-a="mode" data-id="progress" class="${ui.mode === 'progress' ? 'on' : ''}">Reps</button>
+    <button data-a="mode" data-id="weight" class="${ui.mode === 'weight' ? 'on' : ''}">Weight</button>
+    <button data-a="mode" data-id="volume" class="${ui.mode === 'volume' ? 'on' : ''}">Total lifted</button></div>
   <div class="chart">${chartSvg(entries, ui.mode)}</div>
   <div class="sub" style="margin:8px 2px">${ui.mode === 'progress'
-    ? '▲ = weight increase (counts as +1 rep). Line shows cumulative reps gained.' : '▲ = weight increase.'}</div>
+    ? '▲ = weight increase (counts as +1 rep). Line shows cumulative reps gained.'
+    : ui.mode === 'volume' ? '▲ = weight increase. Total = every set\'s reps × weight, added up (warm-ups included once recorded).'
+    : '▲ = weight increase.'}</div>
   <div class="stats"><div class="stat"><b>${entries.length}</b><span>sessions</span></div>
     <div class="stat"><b>${best ? fw(best) : '–'}</b><span>best lb</span></div>
-    <div class="stat"><b>${gain > 0 ? '+' : ''}${gain}</b><span>progress</span></div></div>
+    ${ui.mode === 'volume'
+      ? `<div class="stat"><b>${entries.length ? fmtN(Math.max(...entries.map(entryVol))) : '–'}</b><span>best total lb</span></div>`
+      : `<div class="stat"><b>${gain > 0 ? '+' : ''}${gain}</b><span>progress</span></div>`}</div>
   <h2>History</h2>
   ${entries.length ? entries.map((e, i) => ({ e, i, p: pts[i] })).reverse().map(({ e, i, p }) => `
-    <div class="hrow"><span class="d">${shortDate(e.t)}</span><span class="v">${fw(e.w)} lb × ${e.reps}</span>
+    <div class="hrow"><span class="d">${shortDate(e.t)}</span><span class="v">${fw(e.w)} lb × ${e.reps}<br><span class="sub" style="font-size:13px">${fmtN(entryVol(e))} lb total</span></span>
       ${p.up ? '<span class="tag">▲ WEIGHT UP</span>' : ''}
       <button class="ib ghost" style="width:34px;height:34px;font-size:15px" data-a="delH" data-id="${i}">✕</button></div>`).join('') : '<div class="sub">Nothing yet.</div>'}`;
 }
