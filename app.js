@@ -8,7 +8,9 @@ const defaultDB = () => ({
   history: {},
   settings: { sound: true, flash: true, awake: true, rest: 120 },
   lastDayId: null,
-  active: null
+  active: null,
+  updatedAt: 0,
+  syncedAt: 0
 });
 function load() {
   try {
@@ -21,7 +23,84 @@ function load() {
   return defaultDB();
 }
 let db = load();
-function save() { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {} }
+// Everything except the in-progress workout and sync bookkeeping is what gets synced.
+function dataOnly() { const { active, updatedAt, syncedAt, ...rest } = db; return rest; }
+let lastSnap = JSON.stringify(dataOnly()), applyingRemote = false;
+function save() {
+  try {
+    const s = JSON.stringify(dataOnly());
+    if (s !== lastSnap) {
+      lastSnap = s;
+      if (!applyingRemote) { db.updatedAt = Date.now(); schedulePush(); }
+    }
+    localStorage.setItem(KEY, JSON.stringify(db));
+  } catch (e) {}
+}
+
+/* ---------- cloud sync (Firebase: email/password + Firestore, one doc per user) ---------- */
+const FB_CONFIG = {
+  apiKey: 'AIzaSyBKeI80V73qPPTlrPv2pxp2ppMOC5gH45s',
+  authDomain: 'lifting-app-28c9b.firebaseapp.com',
+  projectId: 'lifting-app-28c9b',
+  storageBucket: 'lifting-app-28c9b.firebasestorage.app',
+  messagingSenderId: '876239792508',
+  appId: '1:876239792508:web:176c4544cd35b34bb99cf9'
+};
+const cloud = { user: null, status: '', busy: false, again: false };
+let fauth = null, fdb = null, pushT = null;
+function cloudInit() {
+  if (!window.firebase) { cloud.status = 'Cloud sync unavailable (no connection to load it)'; return; }
+  try {
+    firebase.initializeApp(FB_CONFIG); fauth = firebase.auth(); fdb = firebase.firestore();
+    fauth.onAuthStateChanged(u => { cloud.user = u; if (u) cloudSync(); else { cloud.status = ''; refreshCloudBox(); } });
+  } catch (e) { cloud.status = 'Cloud error: ' + e.message; }
+}
+function schedulePush() {
+  if (!cloud.user || !fdb) return;
+  clearTimeout(pushT); pushT = setTimeout(cloudSync, 1500);
+}
+function applyRemote(d, t) {
+  applyingRemote = true;
+  const active = db.active, base = defaultDB();
+  db = Object.assign(base, d, { active, updatedAt: t, settings: Object.assign(base.settings, d.settings || {}) });
+  lastSnap = JSON.stringify(dataOnly()); save(); applyingRemote = false;
+  if (!db.active) render();
+}
+async function cloudSync() {
+  if (!cloud.user || !fdb) return;
+  if (cloud.busy) { cloud.again = true; return; }
+  cloud.busy = true; cloud.status = 'Syncing…'; refreshCloudBox();
+  try {
+    const ref = fdb.collection('users').doc(cloud.user.uid), snap = await ref.get();
+    const mine = db.updatedAt || 0;
+    if (snap.exists && snap.data().updatedAt > mine) applyRemote(JSON.parse(snap.data().data), snap.data().updatedAt);
+    else if (!snap.exists || snap.data().updatedAt < mine) await ref.set({ data: JSON.stringify(dataOnly()), updatedAt: mine });
+    db.syncedAt = Date.now(); save();
+    cloud.status = 'Synced ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch (e) { cloud.status = 'Sync failed (' + (e.code || e.message) + '). Will retry.'; }
+  cloud.busy = false; refreshCloudBox();
+  if (cloud.again) { cloud.again = false; schedulePush(); }
+}
+function cloudHtml() {
+  if (!window.firebase) return `<div class="sub">${esc(cloud.status || 'Cloud sync not loaded.')}</div>`;
+  if (cloud.user) return `<div class="card"><div>Signed in as <b>${esc(cloud.user.email)}</b></div>
+    <div class="sub" style="margin-top:4px">${esc(cloud.status)}</div></div>
+    <div class="row"><button class="btn" data-a="cloudNow">Sync now</button><button class="btn" data-a="cloudOut">Sign out</button></div>`;
+  return `<div class="field"><label>Email</label><input type="email" id="cEmail" autocomplete="username" autocapitalize="off"></div>
+    <div class="field"><label>Password (6+ characters)</label><input type="password" id="cPass" autocomplete="current-password"></div>
+    <div class="row"><button class="btn pri" data-a="cloudIn">Sign in</button><button class="btn" data-a="cloudUp">Create account</button></div>
+    <div class="sub" style="margin-top:8px">${esc(cloud.status)}</div>`;
+}
+function refreshCloudBox() {
+  const el = document.getElementById('cloudBox'); if (el && !db.active) el.innerHTML = cloudHtml();
+}
+async function cloudAuth(create) {
+  const e = document.getElementById('cEmail').value.trim(), p = document.getElementById('cPass').value;
+  if (!e || !p) { toast('Enter email and password'); return; }
+  cloud.status = create ? 'Creating account…' : 'Signing in…'; refreshCloudBox();
+  try { await (create ? fauth.createUserWithEmailAndPassword(e, p) : fauth.signInWithEmailAndPassword(e, p)); }
+  catch (err) { cloud.status = (err.code || err.message).replace('auth/', '').replace(/-/g, ' '); refreshCloudBox(); }
+}
 
 /* ---------- helpers ---------- */
 const $app = document.getElementById('app');
@@ -325,6 +404,8 @@ function viewSettings() {
   <div class="sw"><span>Flash when rest ends</span><input type="checkbox" data-s="flash" ${s.flash ? 'checked' : ''}></div>
   <div class="sw"><span>Keep screen on during workout</span><input type="checkbox" data-s="awake" ${s.awake ? 'checked' : ''}></div>
   <div class="field" style="margin-top:6px"><label>Rest timer (seconds)</label><input type="number" inputmode="numeric" id="sRest" value="${s.rest}"></div>
+  <h2>Cloud sync</h2>
+  <div id="cloudBox">${cloudHtml()}</div>
   <h2>Backup</h2>
   <button class="btn" style="width:100%;margin-bottom:10px" data-a="backup">Copy backup to clipboard</button>
   <div class="field"><label>Restore (paste backup text)</label><textarea id="restoreTxt" rows="3"></textarea></div>
@@ -400,6 +481,9 @@ const actions = {
       f.day.exercises = f.day.exercises.filter(e => e.id !== f.ex.id); delete db.history[f.ex.id]; save(); go('editDay');
     }
   },
+  cloudIn: () => cloudAuth(false), cloudUp: () => cloudAuth(true),
+  cloudNow: () => cloudSync(),
+  cloudOut: () => { if (confirm('Sign out? Data stays on this phone but stops syncing.')) fauth.signOut(); },
   backup: async () => {
     const txt = JSON.stringify(db);
     try { await navigator.clipboard.writeText(txt); toast('Backup copied'); } catch (e) { prompt('Copy this backup:', txt); }
@@ -456,10 +540,13 @@ setInterval(() => {
 }, 250);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
+  cloudSync();
   if (db.active) { wake(); const a = db.active; if (a.phase === 'rest' && a.timerEnd <= Date.now()) finishRest(true); else render(); }
 });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+window.addEventListener('online', () => cloudSync());
+cloudInit();
 render();
