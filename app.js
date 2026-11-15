@@ -64,6 +64,7 @@ function applyRemote(d, t) {
   const active = db.active, base = defaultDB();
   db = Object.assign(base, d, { active, updatedAt: t, settings: Object.assign(base.settings, d.settings || {}) });
   lastSnap = JSON.stringify(dataOnly()); save(); applyingRemote = false;
+  if (backfillWarmups()) save();
   if (!db.active) render();
 }
 async function cloudSync() {
@@ -300,6 +301,17 @@ const fmtTime = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 /* progress */
 // Total weight lifted in a session: every warm-up set plus the working set, reps × weight.
 // Sessions logged before warm-ups were recorded only have the working set.
+// Old sessions never recorded their warm-ups; fill them in from the exercise's current warm-up weights and reps.
+function backfillWarmups() {
+  let changed = false;
+  for (const d of db.days) for (const ex of d.exercises) {
+    if (!ex.ww || !ex.ww.length) continue;
+    for (const e of hist(ex.id)) {
+      if (!e.wu) { e.wu = ex.ww.slice(0, ex.wc).map(w => ({ w, reps: ex.wreps })); changed = true; }
+    }
+  }
+  return changed;
+}
 const entryVol = e => (e.wu || []).reduce((s, x) => s + x.w * x.reps, 0) + e.w * e.reps;
 const fmtN = n => Math.round(n).toLocaleString();
 function computeProg(entries) {
@@ -575,6 +587,7 @@ document.addEventListener('visibilitychange', () => {
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
+if (backfillWarmups()) save();
 window.addEventListener('online', () => cloudSync());
 cloudInit();
 render();
