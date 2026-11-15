@@ -72,6 +72,8 @@ async function cloudSync() {
   cloud.busy = true; cloud.status = 'Syncing…'; refreshCloudBox();
   try {
     const ref = fdb.collection('users').doc(cloud.user.uid), snap = await ref.get();
+    // Data saved before sync existed has no timestamp; if it has real content, treat it as newer than an empty cloud copy.
+    if (!db.updatedAt && (Object.keys(db.history).length || db.days.some(d => d.exercises.length))) db.updatedAt = 1;
     const mine = db.updatedAt || 0;
     if (snap.exists && snap.data().updatedAt > mine) applyRemote(JSON.parse(snap.data().data), snap.data().updatedAt);
     else if (!snap.exists || snap.data().updatedAt < mine) await ref.set({ data: JSON.stringify(dataOnly()), updatedAt: mine });
@@ -167,7 +169,7 @@ function completeWarm() {
 }
 function finishRest(withAlert) {
   const a = db.active; if (!a || a.phase !== 'rest') return;
-  a.step++; a.phase = 'set'; a.timerEnd = null;
+  a.step++; a.phase = 'set'; a.timerEnd = null; a.paused = false;
   if (a.step < a.weights.length - 1 && !a.weights[a.step]) a.weights[a.step] = a.weights[a.step - 1]; // carry forward
   save();
   if (withAlert) alertUser();
@@ -250,12 +252,13 @@ function viewWorkout() {
       <div class="res ${r.cls}">${esc(r.title)}</div>
       <div class="res-sub">${esc(r.sub)}</div>
       <div class="next-line">${esc(r.next)}</div></div>
-      <button class="btn pri big" data-a="doneResult">Done</button>`;
+      <div class="row"><button class="btn big" style="flex:0 0 auto" data-a="undoSet">Undo</button>
+        <button class="btn pri big" data-a="doneResult">Done</button></div>`;
   }
   if (a.phase === 'rest') {
     const nextWorking = a.step + 1 === n;
     const nextLabel = nextWorking ? 'Working set' : (a.step + 1 === 0 ? 'Light' : 'Medium');
-    const left = Math.max(0, Math.ceil((a.timerEnd - Date.now()) / 1000));
+    const left = Math.max(0, Math.ceil((a.paused ? a.pausedLeft : a.timerEnd - Date.now()) / 1000));
     const C = 2 * Math.PI * 120;
     return `${head}${dotsHtml(a, ex)}<div class="stage">
       <div class="kind">REST</div>
@@ -264,7 +267,9 @@ function viewWorkout() {
           stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - left / a.restTotal)}"/></svg>
         <div class="tt" id="tt">${fmtTime(left)}</div></div>
       <div class="exname">Next: ${nextLabel} · ${fw(a.weights[a.step + 1])} lb${nextWorking ? '' : ' × ' + ex.wreps}</div></div>
-      <div class="row"><button class="btn" data-a="addTime">+30s</button><button class="btn pri" data-a="skipRest">Skip</button></div>`;
+      <div class="row"><button class="btn" data-a="addTime">+30s</button>
+        <button class="btn" data-a="pause">${a.paused ? '▶ Resume' : '❚❚ Pause'}</button>
+        <button class="btn pri" data-a="skipRest">Skip</button></div>`;
   }
   // phase: set
   const w = a.weights[a.step];
@@ -441,7 +446,21 @@ const actions = {
   showLast: () => { ui.showLast = true; render(); },
   completeWarm, saveSet,
   skipRest: () => finishRest(false),
-  addTime: () => { db.active.timerEnd += 30000; db.active.restTotal += 30; save(); render(); },
+  addTime: () => {
+    const a = db.active;
+    if (a.paused) a.pausedLeft += 30000; else a.timerEnd += 30000;
+    a.restTotal += 30; save(); render();
+  },
+  pause: () => {
+    const a = db.active;
+    if (a.paused) { a.timerEnd = Date.now() + a.pausedLeft; a.paused = false; }
+    else { a.pausedLeft = Math.max(0, a.timerEnd - Date.now()); a.paused = true; }
+    save(); render();
+  },
+  undoSet: () => {
+    const a = db.active, ex = findEx(a.exId).ex;
+    hist(ex.id).pop(); a.phase = 'set'; a.result = null; save(); toast('Set removed'); render();
+  },
   doneResult: () => leaveWorkout(true),
   mode: id => { ui.mode = id; render(); },
   delH: i => { const h = hist(ui.progEx); if (confirm('Delete this entry?')) { h.splice(+i, 1); save(); render(); } },
@@ -531,7 +550,7 @@ document.addEventListener('change', e => {
 
 /* ---------- timer tick ---------- */
 setInterval(() => {
-  const a = db.active; if (!a || a.phase !== 'rest') return;
+  const a = db.active; if (!a || a.phase !== 'rest' || a.paused) return;
   const left = Math.ceil((a.timerEnd - Date.now()) / 1000);
   if (left <= 0) { finishRest(true); return; }
   const tt = document.getElementById('tt'), ring = document.getElementById('ring');
@@ -541,7 +560,7 @@ setInterval(() => {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   cloudSync();
-  if (db.active) { wake(); const a = db.active; if (a.phase === 'rest' && a.timerEnd <= Date.now()) finishRest(true); else render(); }
+  if (db.active) { wake(); const a = db.active; if (a.phase === 'rest' && !a.paused && a.timerEnd <= Date.now()) finishRest(true); else render(); }
 });
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
