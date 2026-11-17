@@ -147,6 +147,26 @@ function alertUser() {
   if (db.settings.flash) { document.body.classList.add('flash'); setTimeout(() => document.body.classList.remove('flash'), 3300); }
   try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
 }
+// iOS suspends a page's timers once it's in the background, unless it is playing audio.
+// A silent looping clip during rest keeps the timer (and the alarm sound) alive. Best effort.
+let keepEl = null;
+function silentWav() {
+  const n = 8000, b = new ArrayBuffer(44 + n), v = new DataView(b);
+  const ws = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + n, true); ws(8, 'WAVE'); ws(12, 'fmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 8000, true); v.setUint32(28, 8000, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true); ws(36, 'data'); v.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);
+  return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+}
+function keepAlive(on) {
+  try {
+    if (on) {
+      if (!keepEl) { keepEl = new Audio(silentWav()); keepEl.loop = true; keepEl.setAttribute('playsinline', ''); }
+      keepEl.play().catch(() => {});
+    } else if (keepEl) keepEl.pause();
+  } catch (e) {}
+}
 let wl = null;
 async function wake() {
   if (!db.settings.awake || !('wakeLock' in navigator) || wl) return;
@@ -164,13 +184,15 @@ function startEx(id) {
   ui.showLast = false; save(); unlockAudio(); wake(); render();
 }
 function completeWarm() {
-  const a = db.active; unlockAudio();
+  const a = db.active, ex = findEx(a.exId).ex; unlockAudio(); keepAlive(true);
+  // Remember "too light" flags so next session shows a hint on that warm-up set.
+  ex.lt = Object.assign({}, ex.lt); if (a.lt && a.lt[a.step]) ex.lt[a.step] = true; else delete ex.lt[a.step];
   a.phase = 'rest'; a.restTotal = db.settings.rest; a.timerEnd = Date.now() + a.restTotal * 1000;
   save(); render();
 }
 function finishRest(withAlert) {
   const a = db.active; if (!a || a.phase !== 'rest') return;
-  a.step++; a.phase = 'set'; a.timerEnd = null; a.paused = false;
+  a.step++; a.phase = 'set'; a.timerEnd = null; a.paused = false; keepAlive(false);
   if (a.step < a.weights.length - 1 && !a.weights[a.step]) a.weights[a.step] = a.weights[a.step - 1]; // carry forward
   save();
   if (withAlert) alertUser();
@@ -200,7 +222,7 @@ function saveSet() {
   save(); render();
 }
 function leaveWorkout(goDay) {
-  const a = db.active; db.active = null; save(); unwake();
+  const a = db.active; db.active = null; save(); unwake(); keepAlive(false);
   if (a && goDay) { ui.view = 'day'; ui.dayId = a.dayId; }
   render();
 }
@@ -283,6 +305,8 @@ function viewWorkout() {
       <input id="wIn" type="number" inputmode="decimal" value="${w ? fw(w) : ''}" placeholder="0">
       <button class="ib" data-a="wPlus">+</button></div>
     <div class="unit">lb</div>
+    ${working ? '' : `${ex.lt && ex.lt[a.step] ? '<div class="hint-up">Last time you marked this too light. Consider increasing weight.</div>' : ''}
+      <button class="btn light ${a.lt && a.lt[a.step] ? 'on' : ''}" data-a="tooLight">${a.lt && a.lt[a.step] ? '✓ Marked too light' : '⬆ Too light — go heavier next time'}</button>`}
     ${working ? `
       <div class="lbl">REPS TO FAILURE</div>
       <div class="wbox"><button class="ib" data-a="rMinus">−</button>
@@ -466,6 +490,7 @@ const actions = {
   rMinus: () => stepVal('r', -1), rPlus: () => stepVal('r', 1),
   showLast: () => { ui.showLast = true; render(); },
   completeWarm, saveSet,
+  tooLight: () => { const a = db.active; a.lt = Object.assign({}, a.lt); a.lt[a.step] = !a.lt[a.step]; save(); render(); },
   skipRest: () => finishRest(false),
   addTime: () => {
     const a = db.active;

@@ -38,6 +38,9 @@ h2{font-size:13px;text-transform:uppercase;letter-spacing:1.2px;color:var(--mute
 .btn.pri{background:var(--acc);color:var(--acc-ink);font-weight:800}
 .btn.big{padding:20px;font-size:22px;border-radius:18px}
 .btn.danger{color:var(--bad)}
+.btn.light{padding:14px 18px;font-size:17px;font-weight:700;margin-top:14px;color:var(--warn);border:2px solid var(--warn);background:transparent}
+.btn.light.on{background:var(--warn);color:#1a1100}
+.hint-up{color:var(--warn);font-size:15px;font-weight:600;text-align:center;margin-top:8px}
 .btn.sm{padding:10px 12px;font-size:14px;flex:0 0 auto}
 .pill{display:flex;align-items:center;justify-content:space-between;width:100%;background:var(--card);
   border-radius:99px;padding:18px 22px;margin-bottom:10px;font-size:18px;font-weight:600;text-align:left}
